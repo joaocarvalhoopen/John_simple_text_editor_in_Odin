@@ -5,6 +5,8 @@ import "core:os"
 import "core:strings"
 import "core:strconv"
 import "core:path/filepath"
+import "core:c/libc"
+import "core:sys/posix"
 
 cmd_quit :: proc() {
 	dirty := false
@@ -186,12 +188,14 @@ cmd_copy :: proc() {
 		append(&g_app.clipboard, ..row[:])
 		append(&g_app.clipboard, '\n')
 		g_app.clip_is_lines = true
+		osc52_copy(g_app.clipboard[:])
 		set_status("Copied line")
 		return
 	}
 	clear(&g_app.clipboard)
 	append(&g_app.clipboard, ..t)
 	g_app.clip_is_lines = false
+	osc52_copy(g_app.clipboard[:])
 	delete(t)
 	set_status("Copied")
 }
@@ -206,6 +210,7 @@ cmd_cut :: proc() {
 		append(&g_app.clipboard, ..row[:])
 		append(&g_app.clipboard, '\n')
 		g_app.clip_is_lines = true
+		osc52_copy(g_app.clipboard[:])
 		// delete the line
 		s := Cursor{b.cursor.row, 0}
 		e: Cursor
@@ -225,14 +230,36 @@ cmd_cut :: proc() {
 	clear(&g_app.clipboard)
 	append(&g_app.clipboard, ..t)
 	g_app.clip_is_lines = false
+	osc52_copy(g_app.clipboard[:])
 	delete(t)
 	delete_selection_if_any(b)
 	set_status("Cut")
 }
 cmd_paste :: proc() {
 	if g_app.active_pane == nil || g_app.active_pane.buffer == nil { return }
-	if len(g_app.clipboard) == 0 { return }
 	b := g_app.active_pane.buffer
+	// Try the system clipboard first (works locally via xclip / xsel /
+	// wl-paste / pbpaste). Over SSH these will fail and we fall through
+	// to the internal clipboard, which already gets fed by OSC 52 from
+	// in-editor copies, and is updated separately by bracketed paste.
+	sys, sys_ok := read_system_clipboard()
+	defer if sys_ok { delete(sys) }
+	if sys_ok && len(sys) > 0 {
+		// Trim a single trailing newline that some helpers add.
+		text := sys
+		if len(text) > 0 && text[len(text)-1] == '\n' {
+			text = text[:len(text)-1]
+		}
+		// Mirror into the internal clipboard so a subsequent in-editor
+		// paste keeps working without re-querying the system tools.
+		clear(&g_app.clipboard)
+		append(&g_app.clipboard, ..text)
+		g_app.clip_is_lines = false
+		insert_text_user(b, text)
+		set_status("Pasted from system clipboard")
+		return
+	}
+	if len(g_app.clipboard) == 0 { return }
 	if g_app.clip_is_lines {
 		// insert line above cursor
 		old := b.cursor
@@ -244,6 +271,37 @@ cmd_paste :: proc() {
 		insert_text_user(b, g_app.clipboard[:])
 	}
 	set_status("Pasted")
+}
+
+// Spawn well-known clipboard helpers and capture stdout. Tools are tried in
+// preference order. Returns a heap-allocated buffer (caller frees) on
+// success. On a typical SSH session none of these will succeed (no DISPLAY
+// / no Wayland socket / no pbpaste); the caller falls back to the editor's
+// internal clipboard in that case.
+read_system_clipboard :: proc() -> ([]u8, bool) {
+	pid := posix.getpid()
+	tmp := fmt.tprintf("/tmp/john_clip_%d", int(pid))
+	defer os.remove(tmp)
+	// Each command must redirect into `tmp`. We test the helper exists
+	// with `command -v` first so failures stay silent (no "not found"
+	// messages leaking into the alt-screen).
+	cmds := []string{
+		"command -v wl-paste >/dev/null 2>&1 && wl-paste --no-newline > '%s' 2>/dev/null",
+		"command -v xclip   >/dev/null 2>&1 && xclip -selection clipboard -o > '%s' 2>/dev/null",
+		"command -v xsel    >/dev/null 2>&1 && xsel --clipboard --output > '%s' 2>/dev/null",
+		"command -v pbpaste >/dev/null 2>&1 && pbpaste > '%s' 2>/dev/null",
+	}
+	for fmt_str in cmds {
+		os.remove(tmp)
+		cmd := fmt.tprintf(fmt_str, tmp)
+		ccmd := strings.clone_to_cstring(cmd, context.temp_allocator)
+		rc := libc.system(ccmd)
+		if rc != 0 { continue }
+		data, ok := os.read_entire_file(tmp)
+		if ok && len(data) > 0 { return data, true }
+		if ok { delete(data) }
+	}
+	return nil, false
 }
 
 cmd_select_all :: proc() {

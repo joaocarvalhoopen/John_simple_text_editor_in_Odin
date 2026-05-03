@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sys/posix"
 import "core:sys/linux"
 import "core:c"
+import "core:encoding/base64"
 
 Winsize :: struct {
 	ws_row:    u16,
@@ -54,11 +55,17 @@ terminal_init :: proc() -> bool {
 	write_str("\x1b[?12h\x1b[1 q")
 	// Enable xterm mouse: button events + drag + SGR encoding
 	write_str("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+	// Enable bracketed paste so the terminal wraps clipboard pastes
+	// in ESC[200~ ... ESC[201~. Lets us treat them as text insertion
+	// rather than a stream of synthetic keys.
+	write_str("\x1b[?2004h")
 	return true
 }
 
 terminal_shutdown :: proc() {
 	if !in_raw_mode { return }
+	// Disable bracketed paste
+	write_str("\x1b[?2004l")
 	// Disable mouse
 	write_str("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
 	write_str("\x1b[?7h")
@@ -117,7 +124,11 @@ Resize_Event :: struct { width, height: int }
 
 Mouse_Event :: struct { x, y: int, button: int, pressed: bool, drag: bool }
 
-Event :: union { Key_Event, Resize_Event, Mouse_Event }
+// Bracketed-paste payload from the terminal. `text` is heap-allocated and
+// must be freed by the consumer.
+Paste_Event :: struct { text: []u8 }
+
+Event :: union { Key_Event, Resize_Event, Mouse_Event, Paste_Event }
 
 resize_pending: bool
 
@@ -328,6 +339,8 @@ parse_csi :: proc(introducer: u8) -> Event {
 		case 21:   return Key_Event{key=.F10, mods=mods}
 		case 23:   return Key_Event{key=.F11, mods=mods}
 		case 24:   return Key_Event{key=.F12, mods=mods}
+		case 200:  return read_bracketed_paste()
+		case 201:  return Key_Event{key=.None}  // stray paste end
 		}
 	}
 	return Key_Event{key=.None}
@@ -362,4 +375,51 @@ parse_int_until :: proc(s: string, start: int, sep: u8) -> (int, int) {
 		i += 1
 	}
 	return n, i
+}
+
+// Reads bytes until the bracketed-paste end marker ESC [ 201 ~ is seen.
+// The terminator is stripped from the returned buffer. The returned slice
+// is heap-allocated and must be freed by the caller.
+read_bracketed_paste :: proc() -> Event {
+	end := []u8{0x1b, '[', '2', '0', '1', '~'}
+	buf: [dynamic]u8
+	match := 0
+	// Allow a longer timeout per byte during paste so we don't truncate
+	// large pastes that arrive with brief gaps.
+	for {
+		b, ok := input_try_byte()
+		if !ok {
+			// One more chance, then give up.
+			b, ok = input_try_byte()
+			if !ok { break }
+		}
+		append(&buf, b)
+		if b == end[match] {
+			match += 1
+			if match == len(end) {
+				resize(&buf, len(buf) - len(end))
+				break
+			}
+		} else {
+			match = (1 if b == 0x1b else 0)
+		}
+	}
+	return Paste_Event{text = buf[:]}
+}
+
+// OSC 52 — write `data` to the terminal's selection buffer ("c" = clipboard).
+// Most modern terminals (xterm, kitty, wezterm, alacritty, iTerm2, foot,
+// recent gnome-terminal) honour this, which lets copy-to-clipboard work
+// transparently across SSH. For tmux, set `set -g set-clipboard on`.
+osc52_copy :: proc(data: []u8) {
+	if len(data) == 0 { return }
+	enc, err := base64.encode(data)
+	if err != nil { return }
+	defer delete(enc)
+	// Some terminals reject very long OSC 52 payloads (typical limit ~74KB
+	// of base64). Skip silently in that case rather than spamming garbage.
+	if len(enc) > 100_000 { return }
+	write_str("\x1b]52;c;")
+	write_str(enc)
+	write_str("\x07")
 }

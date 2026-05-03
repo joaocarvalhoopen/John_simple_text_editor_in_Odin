@@ -196,6 +196,21 @@ handle_event :: proc(ev: Event) {
 		write_str("\x1b[2J\x1b[H")
 	case Mouse_Event:
 		handle_mouse(e)
+	case Paste_Event:
+		defer delete(e.text)
+		if len(e.text) == 0 { return }
+		// Dialogs only consume printable bytes (skip control bytes
+		// other than tab; newlines truncate to first line for single-
+		// line input fields).
+		if g_app.dialog != nil {
+			dialog_handle_paste(e.text)
+			return
+		}
+		if g_app.help_open || g_app.menu.open { return }
+		if g_app.focus == .Tree && g_app.show_tree { return }
+		if g_app.active_pane != nil && g_app.active_pane.buffer != nil {
+			insert_text_user(g_app.active_pane.buffer, e.text)
+		}
 	}
 }
 

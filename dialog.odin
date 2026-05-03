@@ -55,6 +55,24 @@ dialog_close :: proc() {
 	g_app.dialog = nil
 }
 
+// Insert a (possibly multi-line) clipboard paste into the active dialog
+// input field. Newlines and other control bytes are stripped because
+// dialog inputs are single-line; for the Replace dialog the active field
+// is honoured.
+dialog_handle_paste :: proc(text: []u8) {
+	d := g_app.dialog
+	if d == nil { return }
+	if d.kind == .Pick || d.kind == .Completion || d.kind == .Confirm { return }
+	buf := d.field2 ? &d.input2 : &d.input
+	cur := d.field2 ? &d.cursor2 : &d.cursor
+	for b in text {
+		if b == '\n' || b == '\r' { break }
+		if b < 0x20 && b != '\t' { continue }
+		inject_at(buf, cur^, b)
+		cur^ += 1
+	}
+}
+
 dialog_handle_key :: proc(e: Key_Event) {
 	d := g_app.dialog
 	if d == nil { return }

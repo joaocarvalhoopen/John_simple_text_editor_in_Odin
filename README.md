@@ -66,6 +66,13 @@ make
 * Word-wise motion with `Ctrl+←/→`, selection extension with `Shift`.
 * Internal clipboard (`Ctrl+C`/`Ctrl+X`/`Ctrl+V`); when no selection, copy/cut
   acts on the current line (linewise paste re-inserts above the line).
+  Copy/cut also push the text to the **system clipboard via OSC 52**, so
+  it works across SSH on terminals that support OSC 52 (xterm, kitty,
+  wezterm, alacritty, foot, iTerm2, recent gnome-terminal; for tmux set
+  `set -g set-clipboard on`). Pasting from outside JOHN works through
+  **bracketed paste**: use your terminal's native paste shortcut
+  (Cmd/Ctrl+Shift+V, Shift+Insert, middle-click) and the clipboard
+  contents are inserted at the cursor as a single edit.
 * Double-buffered renderer that diffs frames to minimize ANSI output.
 
 ## Key bindings (summary)
