@@ -7,6 +7,11 @@ support for Shell, Makefile, JSON and Markdown).
 ## License
 MIT Open Source License
 
+## Screen
+
+![./img/john_screen.png](./img/john_screen.png)
+
+
 ## Build & run
 
 ```sh
@@ -16,7 +21,6 @@ make
 ./john path/to/dir  # opens a directory (file tree)
 ./john path/file.c  # opens a file
 ```
-
 
 ## Features
 
